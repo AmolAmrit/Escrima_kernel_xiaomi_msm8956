@@ -43,19 +43,10 @@
 #include <soc/qcom/scm.h>
 #include <linux/platform_device.h>
 #include <linux/wakelock.h>
-#include <linux/display_state.h>
 #include <linux/input.h>
 #include <linux/display_state.h>
 
 #define KEY_FINGERPRINT 0x2ee
-
-
-#ifdef CONFIG_MSM_HOTPLUG
-#include <linux/msm_hotplug.h>
-#include <linux/workqueue.h>
-#include <linux/init.h>
-#endif
-
 
 #define FPC1020_RESET_LOW_US 1000
 #define FPC1020_RESET_HIGH1_US 100
@@ -243,14 +234,6 @@ static const struct attribute_group attribute_group = {
 	.attrs = attributes,
 };
 
-#ifdef CONFIG_MSM_HOTPLUG
-static void __cpuinit msm_hotplug_resume_call(struct work_struct *msm_hotplug_resume_call_work)
-{
-	msm_hotplug_resume_timeout();
-}
-static __refdata DECLARE_WORK(msm_hotplug_resume_call_work, msm_hotplug_resume_call);
-#endif
-
 static int fpc1020_input_init(struct fpc1020_data * fpc1020)
 {
 	int ret;
@@ -281,7 +264,6 @@ exit:
 	return ret;
 }
 
-
 static irqreturn_t fpc1020_irq_handler(int irq, void *handle)
 {
 	struct fpc1020_data *fpc1020 = handle;
@@ -297,12 +279,6 @@ static irqreturn_t fpc1020_irq_handler(int irq, void *handle)
 
 	sysfs_notify(&fpc1020->dev->kobj, NULL, dev_attr_irq.attr.name);
 
-//	if (!is_display_on()) {
-	if (fp_bigcore_boost) {
-		sched_set_boost(1);
-		sched_set_boost(0);
-	}
-
 	if (!is_display_on()) {
 		sched_set_boost(1);
 		input_report_key(fpc1020->input_dev, KEY_FINGERPRINT, 1);
@@ -311,7 +287,6 @@ static irqreturn_t fpc1020_irq_handler(int irq, void *handle)
 		input_sync(fpc1020->input_dev);
 		sched_set_boost(0);
 	}
-
 
 	return IRQ_HANDLED;
 }
