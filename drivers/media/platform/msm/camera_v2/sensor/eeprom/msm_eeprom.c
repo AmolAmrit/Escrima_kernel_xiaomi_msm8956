@@ -1904,7 +1904,7 @@ static int msm_eeprom_platform_probe(struct platform_device *pdev)
 				ov16880_set_otp_module_id(e_ctrl);
 			} else if (strcmp(eb_info->eeprom_name, "sunny_omi5f06") == 0) {
 				ov5670_set_otp_module_id(e_ctrl);
-			} else if (strcmp(eb_info->eeprom_name, "s5k5e8_z5e8yab") == 0 ||
+			} else if (strcmp(eb_info->eeprom_name, "s5k5e8_z5e8yab") == 0) ||
 					strcmp(eb_info->eeprom_name, "s5k5e8_yx13") == 0) {
 				s5k5e8_set_otp_module_id(e_ctrl);
 			}
