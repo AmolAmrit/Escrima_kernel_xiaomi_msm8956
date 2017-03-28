@@ -1,16 +1,16 @@
-From 3fa8700291dc660cb50cf6c5a32fcfc8260259ff Mon Sep 17 00:00:00 2001
+From b9daca82fc7639847e6a1b0be68fde25e343b9a5 Mon Sep 17 00:00:00 2001
 From: jhenrique09 <jhenrique09.mcz@hotmail.com>
-Date: Wed, 8 Mar 2017 14:59:47 -0300
-Subject: [PATCH] Goodix patch
+Date: Tue, 28 Mar 2017 16:28:21 -0300
+Subject: [PATCH 1/1] update goodix
 
 ---
  .../arm/boot/dts/qcom/kenzo/kenzo-msm8956-mtp.dtsi | 11 -----
- arch/arm64/configs/lineageos_kenzo_defconfig       |  1 +
+ arch/arm64/configs/lineageos_kenzo_defconfig       |  5 ++-
  drivers/input/misc/fpc1020_tee.c                   | 25 +++++++++--
  drivers/input/misc/goodix/Makefile                 |  4 +-
  drivers/input/misc/goodix/gf_spi.c                 | 51 +++++++++++++++++++---
  drivers/input/misc/goodix/platform.c               |  4 ++
- 6 files changed, 73 insertions(+), 23 deletions(-)
+ 6 files changed, 75 insertions(+), 25 deletions(-)
 
 diff --git a/arch/arm/boot/dts/qcom/kenzo/kenzo-msm8956-mtp.dtsi b/arch/arm/boot/dts/qcom/kenzo/kenzo-msm8956-mtp.dtsi
 index 28a019f..9529b84 100644
@@ -35,17 +35,21 @@ index 28a019f..9529b84 100644
  		compatible = "goodix,fingerprint";
  		vcc_spi-supply  = <&pm8950_l10>;
 diff --git a/arch/arm64/configs/lineageos_kenzo_defconfig b/arch/arm64/configs/lineageos_kenzo_defconfig
-index 00a7688..516ea6c 100644
+index e8b6a06..346a7a5 100644
 --- a/arch/arm64/configs/lineageos_kenzo_defconfig
 +++ b/arch/arm64/configs/lineageos_kenzo_defconfig
-@@ -274,6 +274,7 @@ CONFIG_TOUCHSCREEN_BU21150=y
+@@ -273,8 +273,9 @@ CONFIG_SECURE_TOUCH=y
+ CONFIG_TOUCHSCREEN_BU21150=y
  CONFIG_INPUT_MT_WRAPPER=y
  CONFIG_INPUT_MISC=y
- CONFIG_INPUT_FPC1020=y
+-CONFIG_INPUT_FPC1020=y
+-CONFIG_INPUT_HBTP_INPUT=y
++CONFIG_INPUT_FPC1020=n
 +CONFIG_FINGERPRINT_GOODIX_GF318M=y
- CONFIG_INPUT_HBTP_INPUT=y
++# CONFIG_INPUT_HBTP_INPUT is not set
  CONFIG_SENSORS_MPU6050=y
  CONFIG_SENSORS_LIS3DH=y
+ CONFIG_INPUT_UINPUT=y
 diff --git a/drivers/input/misc/fpc1020_tee.c b/drivers/input/misc/fpc1020_tee.c
 index 1808cf3..b6727c3 100644
 --- a/drivers/input/misc/fpc1020_tee.c
