@@ -27,6 +27,17 @@
 #include "kgsl_device.h"
 #include "kgsl_log.h"
 #include "adreno.h"
+#include "kgsl_mmu.h"
+#include "kgsl_pool.h"
+
+/*
+ * The user can set this from debugfs to force failed memory allocations to
+ * fail without trying OOM first.  This is a debug setting useful for
+ * stress applications that want to test failure cases without pushing the
+ * system into unrecoverable OOM panics
+ */
+
+static bool sharedmem_noretry_flag;
 
 static DEFINE_MUTEX(kernel_map_global_lock);
 
@@ -303,24 +314,37 @@ kgsl_sharedmem_init_sysfs(void)
 		drv_attr_list);
 }
 
+static int kgsl_cma_alloc_secure(struct kgsl_device *device,
+			struct kgsl_memdesc *memdesc, uint64_t size);
+
+static int kgsl_allocate_secure(struct kgsl_device *device,
+				struct kgsl_memdesc *memdesc,
+				struct kgsl_pagetable *pagetable,
+				uint64_t size) {
+	int ret;
+
+	if (MMU_FEATURE(&device->mmu, KGSL_MMU_HYP_SECURE_ALLOC))
+		ret = kgsl_sharedmem_page_alloc_user(memdesc, pagetable, size);
+	else
+		ret = kgsl_cma_alloc_secure(device, memdesc, size);
+
+	return ret;
+}
+
 int kgsl_allocate_user(struct kgsl_device *device,
 		struct kgsl_memdesc *memdesc,
 		struct kgsl_pagetable *pagetable,
 		uint64_t size, uint64_t mmapsize, uint64_t flags)
 {
 	int ret;
-	struct kgsl_mmu *mmu = &device->mmu;
-
-	if (size == 0)
-		return -EINVAL;
 
 	memdesc->flags = flags;
 
 	if (kgsl_mmu_get_mmutype() == KGSL_MMU_TYPE_NONE)
-		ret = kgsl_cma_alloc_coherent(device, memdesc, pagetable, size);
-	else if (flags & KGSL_MEMFLAGS_SECURE &&
-			!MMU_FEATURE(mmu, KGSL_MMU_HYP_SECURE_ALLOC))
-		ret = kgsl_cma_alloc_secure(device, memdesc, size);
+		ret = kgsl_sharedmem_alloc_contig(device, memdesc,
+				pagetable, size);
+	else if (flags & KGSL_MEMFLAGS_SECURE)
+		ret = kgsl_allocate_secure(device, memdesc, pagetable, size);
 	else
 		ret = kgsl_sharedmem_page_alloc_user(memdesc, pagetable, size);
 
@@ -395,9 +419,6 @@ done:
 
 static void kgsl_page_alloc_free(struct kgsl_memdesc *memdesc)
 {
-	unsigned int i = 0;
-	struct scatterlist *sg;
-
 	kgsl_page_alloc_unmap_kernel(memdesc);
 	/* we certainly do not expect the hostptr to still be mapped */
 	BUG_ON(memdesc->hostptr);
@@ -405,7 +426,7 @@ static void kgsl_page_alloc_free(struct kgsl_memdesc *memdesc)
 	/* Secure buffers need to be unlocked before being freed */
 	if (memdesc->priv & KGSL_MEMDESC_TZ_LOCKED) {
 		int ret;
-		int dest_perms = PERM_READ | PERM_WRITE;
+		int dest_perms = PERM_READ | PERM_WRITE | PERM_EXEC;
 		int source_vm = VMID_CP_PIXEL;
 		int dest_vm = VMID_HLOS;
 
@@ -421,28 +442,15 @@ static void kgsl_page_alloc_free(struct kgsl_memdesc *memdesc)
 		kgsl_driver.stats.page_alloc -= (size_t) memdesc->size;
 	}
 
-	for_each_sg(memdesc->sgt->sgl, sg, memdesc->sgt->nents, i) {
-		/*
-		 * sg_alloc_table_from_pages() will collapse any physically
-		 * adjacent pages into a single scatterlist entry. We cannot
-		 * just call __free_pages() on the entire set since we cannot
-		 * ensure that the size is a whole order. Instead, free each
-		 * page or compound page group individually.
-		 */
-		struct page *p = sg_page(sg), *next;
-		unsigned int j = 0, count;
-		while (j < (sg->length/PAGE_SIZE)) {
-			if (memdesc->priv & KGSL_MEMDESC_TZ_LOCKED)
-				ClearPagePrivate(p);
+	if (memdesc->priv & KGSL_MEMDESC_TZ_LOCKED) {
+		struct sg_page_iter sg_iter;
 
-			count = 1 << compound_order(p);
-			next = nth_page(p, count);
-			__free_pages(p, compound_order(p));
-			p = next;
-			j += count;
-
-		}
+		for_each_sg_page(memdesc->sgt->sgl, &sg_iter,
+					memdesc->sgt->nents, 0)
+			ClearPagePrivate(sg_page_iter_page(&sg_iter));
 	}
+
+	kgsl_pool_free_sgt(memdesc->sgt);
 }
 
 /*
@@ -695,32 +703,21 @@ int kgsl_cache_range_op(struct kgsl_memdesc *memdesc, uint64_t offset,
 }
 EXPORT_SYMBOL(kgsl_cache_range_op);
 
-#ifndef CONFIG_ALLOC_BUFFERS_IN_4K_CHUNKS
-static inline int get_page_size(size_t size, unsigned int align)
-{
-	return (align >= ilog2(SZ_64K) && size >= SZ_64K)
-					? SZ_64K : PAGE_SIZE;
-}
-#else
-static inline int get_page_size(size_t size, unsigned int align)
-{
-	return PAGE_SIZE;
-}
-#endif
-
-static int
-_kgsl_sharedmem_page_alloc(struct kgsl_memdesc *memdesc,
+int
+kgsl_sharedmem_page_alloc_user(struct kgsl_memdesc *memdesc,
 			struct kgsl_pagetable *pagetable,
 			uint64_t size)
 {
 	int ret = 0;
-	unsigned int j, pcount = 0, page_size, len_alloc;
+	unsigned int j, page_size, len_alloc;
+	unsigned int pcount = 0;
 	size_t len;
 	struct page **pages = NULL;
-	pgprot_t page_prot = pgprot_writecombine(PAGE_KERNEL);
-	void *ptr;
 	unsigned int align;
-	unsigned int step = ((VMALLOC_END - VMALLOC_START)/8) >> PAGE_SHIFT;
+
+	size = PAGE_ALIGN(size);
+	if (size == 0 || size > UINT_MAX)
+		return -EINVAL;
 
 	size = PAGE_ALIGN(size);
 	if (size == 0 || size > UINT_MAX)
@@ -728,18 +725,17 @@ _kgsl_sharedmem_page_alloc(struct kgsl_memdesc *memdesc,
 
 	align = (memdesc->flags & KGSL_MEMALIGN_MASK) >> KGSL_MEMALIGN_SHIFT;
 
-	page_size = get_page_size(size, align);
+	page_size = kgsl_get_page_size(size, align);
 
 	/*
 	 * The alignment cannot be less than the intended page size - it can be
 	 * larger however to accomodate hardware quirks
 	 */
 
-	if (align < ilog2(page_size))
+	if (align < ilog2(page_size)) {
 		kgsl_memdesc_set_align(memdesc, ilog2(page_size));
-
-	if (size > SIZE_MAX)
-		return -EINVAL;
+		align = ilog2(page_size);
+	}
 
 	/*
 	 * There needs to be enough room in the page array to be able to
@@ -770,31 +766,15 @@ _kgsl_sharedmem_page_alloc(struct kgsl_memdesc *memdesc,
 	len = size;
 
 	while (len > 0) {
-		struct page *page;
-		gfp_t gfp_mask = __GFP_HIGHMEM;
-		int j;
+		int page_count;
 
-		/* don't waste space at the end of the allocation*/
-		if (len < page_size)
-			page_size = PAGE_SIZE;
+		page_count = kgsl_pool_alloc_page(&page_size,
+					pages + pcount, len_alloc - pcount,
+					&align);
 
-		/*
-		 * Don't do some of the more aggressive memory recovery
-		 * techniques for large order allocations
-		 */
-		if (page_size != PAGE_SIZE)
-			gfp_mask |= __GFP_COMP | __GFP_NORETRY |
-				__GFP_NO_KSWAPD | __GFP_NOWARN;
-		else
-			gfp_mask |= GFP_KERNEL;
-
-		page = alloc_pages(gfp_mask, get_order(page_size));
-
-		if (page == NULL) {
-			if (page_size != PAGE_SIZE) {
-				page_size = PAGE_SIZE;
+		if (page_count <= 0) {
+			if (page_count == -EAGAIN)
 				continue;
-			}
 
 			/*
 			 * Update sglen and memdesc size,as requested allocation
@@ -803,19 +783,21 @@ _kgsl_sharedmem_page_alloc(struct kgsl_memdesc *memdesc,
 			 */
 			memdesc->size = (size - len);
 
-			KGSL_CORE_ERR(
-				"Out of memory: only allocated %llXKB of %llXKB requested\n",
-				(size - len) >> 10, size >> 10);
+			if (sharedmem_noretry_flag != true)
+				KGSL_CORE_ERR(
+					"Out of memory: only allocated %lldKB of %lldKB requested\n",
+					(size - len) >> 10, size >> 10);
 
 			ret = -ENOMEM;
 			goto done;
 		}
 
-		for (j = 0; j < page_size >> PAGE_SHIFT; j++)
-			pages[pcount++] = nth_page(page, j);
-
+		pcount += page_count;
 		len -= page_size;
 		memdesc->size += page_size;
+
+		/* Get the needed page size for the next iteration */
+		page_size = kgsl_get_page_size(len, align);
 	}
 
 	ret = sg_alloc_table_from_pages(memdesc->sgt, pages, pcount, 0,
@@ -850,57 +832,18 @@ _kgsl_sharedmem_page_alloc(struct kgsl_memdesc *memdesc,
 		goto done;
 	}
 
-	/*
-	 * All memory that goes to the user has to be zeroed out before it gets
-	 * exposed to userspace. This means that the memory has to be mapped in
-	 * the kernel, zeroed (memset) and then unmapped.  This also means that
-	 * the dcache has to be flushed to ensure coherency between the kernel
-	 * and user pages. We used to pass __GFP_ZERO to alloc_page which mapped
-	 * zeroed and unmaped each individual page, and then we had to turn
-	 * around and call flush_dcache_page() on that page to clear the caches.
-	 * This was killing us for performance. Instead, we found it is much
-	 * faster to allocate the pages without GFP_ZERO, map a chunk of the
-	 * range ('step' pages), memset it, flush it and then unmap
-	 * - this results in a factor of 4 improvement for speed for large
-	 * buffers. There is a small decrease in speed for small buffers,
-	 * but only on the order of a few microseconds at best. The 'step'
-	 * size is based on a guess at the amount of free vmalloc space, but
-	 * will scale down if there's not enough free space.
-	 */
-	for (j = 0; j < pcount; j += step) {
-		step = min(step, pcount - j);
-
-		ptr = vmap(&pages[j], step, VM_IOREMAP, page_prot);
-
-		if (ptr != NULL) {
-			memset(ptr, 0, step * PAGE_SIZE);
-			dmac_flush_range(ptr, ptr + step * PAGE_SIZE);
-			vunmap(ptr);
-		} else {
-			int k;
-			/* Very, very, very slow path */
-
-			for (k = j; k < j + step; k++) {
-				ptr = kmap_atomic(pages[k]);
-				memset(ptr, 0, PAGE_SIZE);
-				dmac_flush_range(ptr, ptr + PAGE_SIZE);
-				kunmap_atomic(ptr);
-			}
-			/* scale down the step size to avoid this path */
-			if (step > 1)
-				step >>= 1;
-		}
-	}
-
 	KGSL_STATS_ADD(memdesc->size, kgsl_driver.stats.page_alloc,
 		kgsl_driver.stats.page_alloc_max);
 
 done:
 	if (ret) {
-		unsigned int count = 1;
-		for (j = 0; j < pcount; j += count) {
-			count = 1 << compound_order(pages[j]);
-			__free_pages(pages[j], compound_order(pages[j]));
+		if (pages) {
+			unsigned int count = 1;
+
+			for (j = 0; j < pcount; j += count) {
+				count = 1 << compound_order(pages[j]);
+				kgsl_pool_free_page(pages[j]);
+			}
 		}
 
 		kfree(memdesc->sgt);
@@ -910,19 +853,6 @@ done:
 
 	return ret;
 }
-
-int
-kgsl_sharedmem_page_alloc_user(struct kgsl_memdesc *memdesc,
-			    struct kgsl_pagetable *pagetable,
-			    uint64_t size)
-{
-	size = PAGE_ALIGN(size);
-	if (size == 0)
-		return -EINVAL;
-
-	return _kgsl_sharedmem_page_alloc(memdesc, pagetable, size);
-}
-EXPORT_SYMBOL(kgsl_sharedmem_page_alloc_user);
 
 void kgsl_sharedmem_free(struct kgsl_memdesc *memdesc)
 {
@@ -957,8 +887,8 @@ kgsl_sharedmem_readl(const struct kgsl_memdesc *memdesc,
 	if (offsetbytes % sizeof(uint32_t) != 0)
 		return -EINVAL;
 
-	WARN_ON(offsetbytes + sizeof(uint32_t) > memdesc->size);
-	if (offsetbytes + sizeof(uint32_t) > memdesc->size)
+	WARN_ON(offsetbytes > (memdesc->size - sizeof(uint32_t)));
+	if (offsetbytes > (memdesc->size - sizeof(uint32_t)))
 		return -ERANGE;
 
 	rmb();
@@ -980,8 +910,8 @@ kgsl_sharedmem_writel(struct kgsl_device *device,
 	if (offsetbytes % sizeof(uint32_t) != 0)
 		return -EINVAL;
 
-	WARN_ON(offsetbytes + sizeof(uint32_t) > memdesc->size);
-	if (offsetbytes + sizeof(uint32_t) > memdesc->size)
+	WARN_ON(offsetbytes > (memdesc->size - sizeof(uint32_t)));
+	if (offsetbytes > (memdesc->size - sizeof(uint32_t)))
 		return -ERANGE;
 	kgsl_cffdump_write(device,
 		memdesc->gpuaddr + offsetbytes,
@@ -1006,8 +936,8 @@ kgsl_sharedmem_readq(const struct kgsl_memdesc *memdesc,
 	if (offsetbytes % sizeof(uint32_t) != 0)
 		return -EINVAL;
 
-	WARN_ON(offsetbytes + sizeof(uint32_t) > memdesc->size);
-	if (offsetbytes + sizeof(uint32_t) > memdesc->size)
+	WARN_ON(offsetbytes > (memdesc->size - sizeof(uint32_t)));
+	if (offsetbytes > (memdesc->size - sizeof(uint32_t)))
 		return -ERANGE;
 
 	/*
@@ -1033,8 +963,8 @@ kgsl_sharedmem_writeq(struct kgsl_device *device,
 	if (offsetbytes % sizeof(uint32_t) != 0)
 		return -EINVAL;
 
-	WARN_ON(offsetbytes + sizeof(uint32_t) > memdesc->size);
-	if (offsetbytes + sizeof(uint32_t) > memdesc->size)
+	WARN_ON(offsetbytes > (memdesc->size - sizeof(uint32_t)));
+	if (offsetbytes > (memdesc->size - sizeof(uint32_t)))
 		return -ERANGE;
 	kgsl_cffdump_write(device,
 		_lo_32(memdesc->gpuaddr + offsetbytes), src);
@@ -1108,14 +1038,13 @@ void kgsl_get_memory_usage(char *name, size_t name_size, uint64_t memflags)
 }
 EXPORT_SYMBOL(kgsl_get_memory_usage);
 
-int kgsl_cma_alloc_coherent(struct kgsl_device *device,
+int kgsl_sharedmem_alloc_contig(struct kgsl_device *device,
 			struct kgsl_memdesc *memdesc,
 			struct kgsl_pagetable *pagetable, uint64_t size)
 {
 	int result = 0;
 
-	size = ALIGN(size, PAGE_SIZE);
-
+	size = PAGE_ALIGN(size);
 	if (size == 0 || size > SIZE_MAX)
 		return -EINVAL;
 
@@ -1138,6 +1067,9 @@ int kgsl_cma_alloc_coherent(struct kgsl_device *device,
 
 	/* Record statistics */
 
+	if (kgsl_mmu_get_mmutype() == KGSL_MMU_TYPE_NONE)
+		memdesc->gpuaddr = memdesc->physaddr;
+
 	KGSL_STATS_ADD(size, kgsl_driver.stats.coherent,
 		       kgsl_driver.stats.coherent_max);
 
@@ -1147,7 +1079,7 @@ err:
 
 	return result;
 }
-EXPORT_SYMBOL(kgsl_cma_alloc_coherent);
+EXPORT_SYMBOL(kgsl_sharedmem_alloc_contig);
 
 static int scm_lock_chunk(struct kgsl_memdesc *memdesc, int lock)
 {
@@ -1203,7 +1135,7 @@ static int scm_lock_chunk(struct kgsl_memdesc *memdesc, int lock)
 	return result;
 }
 
-int kgsl_cma_alloc_secure(struct kgsl_device *device,
+static int kgsl_cma_alloc_secure(struct kgsl_device *device,
 			struct kgsl_memdesc *memdesc, uint64_t size)
 {
 	struct kgsl_iommu *iommu = device->mmu.priv;
@@ -1211,14 +1143,11 @@ int kgsl_cma_alloc_secure(struct kgsl_device *device,
 	struct kgsl_pagetable *pagetable = device->mmu.securepagetable;
 	size_t aligned;
 
-	if (size == 0)
-		return -EINVAL;
-
 	/* Align size to 1M boundaries */
 	aligned = ALIGN(size, SZ_1M);
 
 	/* The SCM call uses an unsigned int for the size */
-	if (aligned > UINT_MAX)
+	if (aligned == 0 || aligned > UINT_MAX)
 		return -EINVAL;
 
 	/*
@@ -1269,7 +1198,6 @@ err:
 
 	return result;
 }
-EXPORT_SYMBOL(kgsl_cma_alloc_secure);
 
 /**
  * kgsl_cma_unlock_secure() - Unlock secure memory by calling TZ
@@ -1282,4 +1210,14 @@ static void kgsl_cma_unlock_secure(struct kgsl_memdesc *memdesc)
 
 	if (!scm_lock_chunk(memdesc, 0))
 		ClearPagePrivate(sg_page(memdesc->sgt->sgl));
+}
+
+void kgsl_sharedmem_set_noretry(bool val)
+{
+	sharedmem_noretry_flag = val;
+}
+
+bool kgsl_sharedmem_get_noretry(void)
+{
+	return sharedmem_noretry_flag;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-201666666, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -78,7 +78,7 @@
 			linux,reserve-contiguous-region;
 			linux,reserve-region;
 			linux,remove-completely;
-			reg = <0x0 0x8c200000 0x0 0x1700000>;
+			reg = <0x0 0x8c200000 0x0 0x1800000>;
 			label = "reloc_mem";
 		};
 
@@ -91,18 +91,21 @@
 
 		secure_mem: secure_region@0 {
 			linux,reserve-contiguous-region;
+			linux,memory-limit = <0xffffffff>;
 			reg = <0x0 0x0 0x0 0x8100000>;
 			label = "secure_mem";
 		};
 
 		qseecom_mem: qseecom_region@0 {
 			linux,reserve-contiguous-region;
+			linux,memory-limit = <0xffffffff>;
 			reg = <0x0 0x0 0x0 0x1000000>;
 			label = "qseecom_mem";
 		};
 
 		audio_mem: audio_region@0 {
 			linux,reserve-contiguous-region;
+			linux,memory-limit = <0xffffffff>;
 			reg = <0x0 0x0 0x0 0x314000>;
 		};
 
@@ -115,6 +118,7 @@
 
 		adsp_mem: adsp_region@0 {
 			linux,reserve-contiguous-region;
+			linux,memory-limit = <0xffffffff>;
 			reg = <0x0 0x0 0x0 0x400000>;
 			label = "adsp_mem";
 		};
@@ -817,6 +821,7 @@
 		qcom,vdd-restriction-temp-hysteresis = <10>;
 		vdd-dig-supply = <&pm8950_s2_floor_level>;
 		vdd-gfx-supply = <&gfx_vreg_corner>;
+		qcom,therm-hw-version-enable;
 
 		qcom,vdd-dig-rstr {
 			qcom,vdd-rstr-reg = "vdd-dig";
@@ -936,6 +941,7 @@
 
 		sdhc-msm-crypto = <&sdcc1_ice>;
 		qcom,bus-width = <8>;
+		qcom,large-address-bus;
 
 		qcom,cpu-dma-latency-us = <60 340 900>;
 		qcom,cpu-affinity = "affine_cores";
@@ -980,6 +986,7 @@
 		interrupt-names = "hc_irq", "pwr_irq";
 
 		qcom,bus-width = <4>;
+		qcom,large-address-bus;
 
 		qcom,cpu-dma-latency-us = <701>;
 
@@ -1012,6 +1019,7 @@
 		reg-names = "hc_mem", "core_mem";
 
 		qcom,bus-width = <4>;
+		qcom,large-address-bus;
 		gpios = <&msm_gpio 44 0>, /* CLK */
 			<&msm_gpio 43 0>, /* CMD */
 			<&msm_gpio 42 0>, /* DATA0 */
@@ -1272,6 +1280,8 @@
 				"xo";
 		qcom,bus-clk-rate = <320000000 200000000 100000000>;
 		qcom,max-nominal-sysclk-rate = <133330000>;
+		qcom,max-svs-sysclk-rate = <100000000>;
+		qcom,pm-qos-latency = <59>;
 	};
 
 	android_usb: android_usb@086000c8 {
@@ -1583,6 +1593,8 @@
 		qcom,use-sw-aes-xts-algo;
 		qcom,use-sw-aes-ccm-algo;
 		qcom,use-sw-ahash-algo;
+		qcom,use-sw-hmac-algo;
+		qcom,use-sw-aead-algo;
 		qcom,ce-opp-freq = <100000000>;
 	};
 
@@ -2348,11 +2360,6 @@
 				"msm-dai-q6-dev.12292", "msm-dai-q6-dev.12293";
 		asoc-codec = <&stub_codec>;
 		asoc-codec-names = "msm-stub-codec.1";
-		qcom,max-aux-codec = <2>;
-		qcom,aux-codec = "wsa881x.20170211", "wsa881x.20170212",
-				 "wsa881x.21170213", "wsa881x.21170214";
-		qcom,aux-codec-prefix = "SpkrLeft", "SpkrRight",
-					"SpkrLeft", "SpkrRight";
 	};
 
 	wcd9xxx_intc: wcd9xxx-irq {
@@ -2750,15 +2757,6 @@
 		vdd-wlan-supply = <&rome_vreg>;
 		vdd-wlan-io-supply = <&pm8950_l5>;
 		qcom,wlan-ramdump-dynamic = <0x200000>;
-		qcom,cnss-enable-bus-bandwidth;
-		qcom,msm-bus,name = "msm-cnss";
-		qcom,msm-bus,num-cases = <4>;
-		qcom,msm-bus,num-paths = <1>;
-		qcom,msm-bus,vectors-KBps =
-				<79 512 0 0>,			/* No vote */
-				<79 512 6250 200000>,		/* 50 Mbps */
-				<79 512 25000 200000>,		/* 200 Mbps */
-				<79 512 2048000 4096000>;	/* MAX */
 		status = "disabled";
 	};
 
