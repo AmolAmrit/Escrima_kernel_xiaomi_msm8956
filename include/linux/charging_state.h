@@ -14,7 +14,4 @@
 
 extern bool charging_detected(void);
 
-// UKSM RUN ON CHARGINGs
-extern void uksm_charging_switcher(void);
-
 #endif
