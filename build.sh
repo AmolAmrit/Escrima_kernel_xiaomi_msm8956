@@ -2,7 +2,7 @@ KERNEL_DIR=$PWD
 Anykernel_DIR=$KERNEL_DIR/AnyKernel2/
 DATE=$(date +"%d%m%Y")
 TIME=$(date +"-%H.%M.%S")
-KERNEL_NAME="Escrima-X26-Kamui-LightningBlade-PurpleLightning"
+KERNEL_NAME="Escrima-X26-Kamui-LightningBlade-PurpleLightning-OldJackFix"
 DEVICE="-kenzo-"
 FINAL_ZIP="$KERNEL_NAME""$DEVICE""$DATE""$TIME"
 
