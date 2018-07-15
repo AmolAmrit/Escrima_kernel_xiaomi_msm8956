@@ -24,6 +24,7 @@ export objdir="$PWD/obj"
 export sourcedir="$PWD/releases"
 export anykernel="$PWD/AnyKernel"
 export kerneldir="$PWD"
+rm -rf $objdir
 mkdir $objdir
 
 jackstuff()
@@ -74,7 +75,12 @@ rm -rf $kerneldir/sound/soc/codecs/wcd-mbhc-v2.h
 rm -rf $kerneldir/sound/soc/codecs/wcd-mbhc-v2.c
 cp -a $kerneldir/fixes/headphonejack/stock/wcd-mbhc-v2.h $kerneldir/sound/soc/codecs/
 cp -a $kerneldir/fixes/headphonejack/stock/wcd-mbhc-v2.c $kerneldir/sound/soc/codecs/
-rm -rf ojb
+rm -rf $objdir/*
+}
+upload()
+{
+# gdrive upload $sourcedir/$zip_name
+ls $sourcedir/$zip_name
 }
 
 jackstuff
@@ -86,10 +92,7 @@ build_package
 make_name
 turn_back
 rmjackstuff
+upload
 BUILD_END=$(date +"%s")
 DIFF=$(($BUILD_END - $BUILD_START))
 echo -e "$blue Build completed in $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds.$nocol"
-
-
-
-
