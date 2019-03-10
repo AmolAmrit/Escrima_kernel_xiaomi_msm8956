@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -10,6 +10,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
+#include <linux/ctype.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -20,38 +21,31 @@
 #include <linux/rcupdate.h>
 #include <linux/notifier.h>
 #include <linux/vmpressure.h>
+#include <linux/proc_fs.h>
+#include <linux/uaccess.h>
+#include <linux/slab.h>
 
-#define CREATE_TRACE_POINTS
-#include <trace/events/process_reclaim.h>
 
-#define MAX_SWAP_TASKS SWAP_CLUSTER_MAX
+#define MAX_SWAP_TASKS 200
+
 
 static void swap_fn(struct work_struct *work);
-DECLARE_WORK(swap_work, swap_fn);
+static DECLARE_DELAYED_WORK(swap_work, swap_fn);
 
 /* User knob to enable/disable process reclaim feature */
-static int enable_process_reclaim = 1;
-module_param_named(enable_process_reclaim, enable_process_reclaim, int,
+static int enable_force_reclaim = 1;
+module_param_named(enable_force_reclaim, enable_force_reclaim, int,
 	S_IRUGO | S_IWUSR);
 
-/* The max number of pages tried to be reclaimed in a single run */
-int per_swap_size = SWAP_CLUSTER_MAX * 32;
-module_param_named(per_swap_size, per_swap_size, int, S_IRUGO | S_IWUSR);
-
-int reclaim_avg_efficiency;
+static int reclaim_avg_efficiency;
 module_param_named(reclaim_avg_efficiency, reclaim_avg_efficiency,
 			int, S_IRUGO);
 
 /* The vmpressure region where process reclaim operates */
-static unsigned long pressure_min = 40;
-static unsigned long pressure_max = 85;
-static unsigned long pressure = 0;
+static unsigned long pressure_min = 50;
+static unsigned long pressure_max = 90;
 module_param_named(pressure_min, pressure_min, ulong, S_IRUGO | S_IWUSR);
 module_param_named(pressure_max, pressure_max, ulong, S_IRUGO | S_IWUSR);
-
-static short min_score_adj = 360;
-module_param_named(min_score_adj, min_score_adj, short,
-	S_IRUGO | S_IWUSR);
 
 /*
  * Scheduling process reclaim workqueue unecessarily
@@ -65,8 +59,10 @@ module_param_named(min_score_adj, min_score_adj, short,
 static int swap_eff_win = 2;
 module_param_named(swap_eff_win, swap_eff_win, int, S_IRUGO | S_IWUSR);
 
-static int swap_opt_eff = 50;
+static int swap_opt_eff = 10;
 module_param_named(swap_opt_eff, swap_opt_eff, int, S_IRUGO | S_IWUSR);
+
+static atomic_t swap_opt_delay = ATOMIC_INIT(0);
 
 static atomic_t skip_reclaim = ATOMIC_INIT(0);
 /* Not atomic since only a single instance of swap_fn run at a time */
@@ -78,7 +74,7 @@ struct selected_task {
 	short oom_score_adj;
 };
 
-int selected_cmp(const void *a, const void *b)
+static int selected_cmp(const void *a, const void *b)
 {
 	const struct selected_task *x = a;
 	const struct selected_task *y = b;
@@ -114,7 +110,7 @@ static void swap_fn(struct work_struct *work)
 	struct reclaim_param rp;
 
 	/* Pick the best MAX_SWAP_TASKS tasks in terms of anon size */
-	struct selected_task selected[MAX_SWAP_TASKS] = {{0, 0, 0},};
+	struct selected_task *selected;
 	int si = 0;
 	int i;
 	int tasksize;
@@ -123,6 +119,19 @@ static void swap_fn(struct work_struct *work)
 	int total_reclaimed = 0;
 	int nr_to_reclaim;
 	int efficiency;
+
+	long delay;
+
+	pr_info("force_reclaim: force reclaim starts to work\n");
+
+	selected = (struct selected_task *) kmalloc(sizeof(struct selected_task) \
+					* MAX_SWAP_TASKS, GFP_KERNEL);
+	if (selected == NULL) {
+		pr_err("invalid memory\n");
+		return;
+	}
+	memset((uint8_t *)selected, 0, \
+		sizeof(struct selected_task) * MAX_SWAP_TASKS);
 
 	rcu_read_lock();
 	for_each_process(tsk) {
@@ -140,7 +149,7 @@ static void swap_fn(struct work_struct *work)
 			continue;
 
 		oom_score_adj = p->signal->oom_score_adj;
-		if (oom_score_adj < min_score_adj) {
+		if (oom_score_adj >= 900) {
 			task_unlock(p);
 			continue;
 		}
@@ -174,6 +183,7 @@ static void swap_fn(struct work_struct *work)
 	/* Skip reclaim if total size is too less */
 	if (total_sz < SWAP_CLUSTER_MAX) {
 		rcu_read_unlock();
+		kfree(selected);
 		return;
 	}
 
@@ -183,18 +193,13 @@ static void swap_fn(struct work_struct *work)
 	rcu_read_unlock();
 
 	while (si--) {
-		nr_to_reclaim =
-			(selected[si].tasksize * per_swap_size) / total_sz;
+		nr_to_reclaim = selected[si].tasksize;
 		/* scan atleast a page */
 		if (!nr_to_reclaim)
 			nr_to_reclaim = 1;
 
 		rp = reclaim_task_anon(selected[si].p, nr_to_reclaim);
 
-		trace_process_reclaim(selected[si].tasksize,
-				selected[si].oom_score_adj, rp.nr_scanned,
-				rp.nr_reclaimed, per_swap_size, total_sz,
-				nr_to_reclaim);
 		total_scan += rp.nr_scanned;
 		total_reclaimed += rp.nr_reclaimed;
 		put_task_struct(selected[si].p);
@@ -205,7 +210,7 @@ static void swap_fn(struct work_struct *work)
 
 		if (efficiency < swap_opt_eff) {
 			if (++monitor_eff == swap_eff_win) {
-				atomic_set(&skip_reclaim, swap_eff_win + 1);
+				atomic_set(&skip_reclaim, swap_eff_win);
 				monitor_eff = 0;
 			}
 		} else {
@@ -214,44 +219,99 @@ static void swap_fn(struct work_struct *work)
 
 		reclaim_avg_efficiency =
 			(efficiency + reclaim_avg_efficiency) / 2;
-		trace_process_reclaim_eff(efficiency, reclaim_avg_efficiency);
+	}
+
+	kfree(selected);
+
+	delay = atomic_read(&swap_opt_delay);
+
+	if (delay != 0) {
+		queue_delayed_work(system_unbound_wq, &swap_work, (delay / 1000) * HZ);
+		atomic_set(&swap_opt_delay, 0);
 	}
 }
 
-static int vmpressure_notifier(struct notifier_block *nb,
-			unsigned long action, void *data)
+static int force_reclaim_show(struct seq_file *m, void *v)
 {
-	pressure = action;
-
-	if (!enable_process_reclaim)
+	if (!enable_force_reclaim) {
+		seq_printf(m, "disabled\n");
 		return 0;
+	}
 
-	if (!current_is_kswapd())
+	if (0 < atomic_read(&skip_reclaim)) {
+		seq_printf(m, "low efficiency\n");
 		return 0;
+	}
 
-	if (!atomic_dec_and_test(&skip_reclaim))
-		return 0;
-
-	if ((pressure >= pressure_min) && (pressure < pressure_max))
-		if (!work_pending(&swap_work))
-			queue_work(system_unbound_wq, &swap_work);
+	seq_printf(m, delayed_work_pending(&swap_work) ? "working\n" : "idle\n");
 	return 0;
 }
 
-static struct notifier_block vmpr_nb = {
-	.notifier_call = vmpressure_notifier,
+static int force_reclaim_write(struct file *flip, const char *ubuf, size_t cnt, loff_t *data)
+{
+	char buf[256];
+	size_t copysz = cnt;
+	unsigned long delay = 0;
+
+	if (cnt > sizeof(buf))
+		copysz = sizeof(buf) - 1;
+
+	if (copy_from_user(&buf, ubuf, copysz))
+		return -EFAULT;
+
+	/* check input is a valid timeout val */
+	if (!isdigit(buf[0]))
+		return -EINVAL;
+
+	/* uint is in milliseconds */
+	delay = simple_strtoul(buf, (char **)&buf, 10);
+
+	if (cnt >= 1) {
+		if (!enable_force_reclaim)
+			return 0;
+		if (0 < atomic_read(&skip_reclaim) ||
+			(0 < atomic_read(&swap_opt_delay)))
+			return 0;
+
+		if (!delayed_work_pending(&swap_work)) {
+			pr_info("force_reclaim: queue swap work with delay: %ld\n", delay);
+			atomic_set(&swap_opt_delay, delay);
+			queue_delayed_work(system_unbound_wq, &swap_work, 0);
+		}
+	}
+
+	return cnt;
+}
+
+
+static int force_reclaim_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, force_reclaim_show, inode->i_private);
+}
+
+static const struct file_operations force_reclaim_fops = {
+	.open = force_reclaim_open,
+	.write = force_reclaim_write,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
 };
 
-static int __init process_reclaim_init(void)
+static int __init force_reclaim_init(void)
 {
-	vmpressure_notifier_register(&vmpr_nb);
+	struct proc_dir_entry *pe;
+
+	pe = proc_create("force_reclaim", 0664, NULL, &force_reclaim_fops);
+	if (!pe)
+		return -ENOMEM;
+
 	return 0;
 }
 
-static void __exit process_reclaim_exit(void)
+static void __exit force_reclaim_exit(void)
 {
-	vmpressure_notifier_unregister(&vmpr_nb);
+	return;
 }
 
-module_init(process_reclaim_init);
-module_exit(process_reclaim_exit);
+module_init(force_reclaim_init);
+module_exit(force_reclaim_exit);
