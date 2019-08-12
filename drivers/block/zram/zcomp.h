@@ -39,12 +39,9 @@ struct zcomp_backend {
 
 /* dynamic per-device compression frontend */
 struct zcomp {
-	void *stream;
+	struct mutex strm_lock;
+	struct zcomp_strm *zstrm;
 	struct zcomp_backend *backend;
-
-	struct zcomp_strm *(*strm_find)(struct zcomp *comp);
-	void (*strm_release)(struct zcomp *comp, struct zcomp_strm *zstrm);
-	void (*destroy)(struct zcomp *comp);
 };
 
 struct zcomp *zcomp_create(const char *comp);
