@@ -50,8 +50,6 @@ struct zcomp {
 	void (*destroy)(struct zcomp *comp);
 };
 
-ssize_t zcomp_available_show(const char *comp, char *buf);
-
 struct zcomp *zcomp_create(const char *comp, int max_strm);
 void zcomp_destroy(struct zcomp *comp);
 
