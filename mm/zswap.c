@@ -547,7 +547,6 @@ static struct zswap_pool *zswap_pool_last_get(void)
 	return last;
 }
 
-/* type and compressor must be null-terminated */
 static struct zswap_pool *zswap_pool_find_get(char *type, char *compressor)
 {
 	struct zswap_pool *pool;
@@ -555,9 +554,10 @@ static struct zswap_pool *zswap_pool_find_get(char *type, char *compressor)
 	assert_spin_locked(&zswap_pools_lock);
 
 	list_for_each_entry_rcu(pool, &zswap_pools, list) {
-		if (strcmp(pool->tfm_name, compressor))
+		if (strncmp(pool->tfm_name, compressor, sizeof(pool->tfm_name)))
 			continue;
-		if (strcmp(zpool_get_type(pool->zpool), type))
+		if (strncmp(zpool_get_type(pool->zpool), type,
+			    sizeof(zswap_zpool_type)))
 			continue;
 		/* if we can't get it, it's about to be destroyed */
 		if (!zswap_pool_get(pool))
