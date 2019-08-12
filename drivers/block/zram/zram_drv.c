@@ -735,9 +735,8 @@ static void zram_reset_device(struct zram *zram)
 	zram->meta = NULL;
 	/* Reset stats */
 	memset(&zram->stats, 0, sizeof(zram->stats));
-	zram->disksize = 0;
-	set_capacity(zram->disk, 0);
 
+	zram->disksize = 0;
 	up_write(&zram->init_lock);
 }
 
@@ -830,6 +829,7 @@ static ssize_t reset_store(struct device *dev,
 	/* Make sure all pending I/O is finished */
 	fsync_bdev(bdev);
 	zram_reset_device(zram);
+	set_capacity(zram->disk, 0);
 
 	mutex_unlock(&bdev->bd_mutex);
 	revalidate_disk(zram->disk);
@@ -1074,31 +1074,15 @@ out:
 	return ret;
 }
 
-static void destroy_devices(unsigned int nr)
+static void destroy_device(struct zram *zram)
 {
-	struct zram *zram;
-	unsigned int i;
+	sysfs_remove_group(&disk_to_dev(zram->disk)->kobj,
+			&zram_disk_attr_group);
 
-	for (i = 0; i < nr; i++) {
-		zram = &zram_devices[i];
-		/*
-		 * Remove sysfs first, so no one will perform a disksize
-		 * store while we destroy the devices
-		 */
-		sysfs_remove_group(&disk_to_dev(zram->disk)->kobj,
-				&zram_disk_attr_group);
+	del_gendisk(zram->disk);
+	put_disk(zram->disk);
 
-		zram_reset_device(zram);
-
-		del_gendisk(zram->disk);
-		put_disk(zram->disk);
-
-		blk_cleanup_queue(zram->queue);
-	}
-
-	kfree(zram_devices);
-	unregister_blkdev(zram_major, "zram");
-	pr_info("Destroyed %u device(s)\n", nr);
+	blk_cleanup_queue(zram->queue);
 }
 
 static int __init zram_init(void)
@@ -1108,39 +1092,63 @@ static int __init zram_init(void)
 	if (num_devices > max_num_devices) {
 		pr_warn("Invalid value for num_devices: %u\n",
 				num_devices);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out;
 	}
 
 	zram_major = register_blkdev(0, "zram");
 	if (zram_major <= 0) {
 		pr_warn("Unable to get major number\n");
-		return -EBUSY;
+		ret = -EBUSY;
+		goto out;
 	}
 
 	/* Allocate the device array and initialize each one */
 	zram_devices = kzalloc(num_devices * sizeof(struct zram), GFP_KERNEL);
 	if (!zram_devices) {
-		unregister_blkdev(zram_major, "zram");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto unregister;
 	}
 
 	for (dev_id = 0; dev_id < num_devices; dev_id++) {
 		ret = create_device(&zram_devices[dev_id], dev_id);
 		if (ret)
-			goto out_error;
+			goto free_devices;
 	}
+	pr_info("Created %u device(s) ...\n", num_devices);
 
-	pr_info("Created %u device(s)\n", num_devices);
 	return 0;
 
-out_error:
-	destroy_devices(dev_id);
+free_devices:
+	while (dev_id)
+		destroy_device(&zram_devices[--dev_id]);
+	kfree(zram_devices);
+unregister:
+	unregister_blkdev(zram_major, "zram");
+out:
 	return ret;
 }
 
 static void __exit zram_exit(void)
 {
-	destroy_devices(num_devices);
+	int i;
+	struct zram *zram;
+
+	for (i = 0; i < num_devices; i++) {
+		zram = &zram_devices[i];
+
+		destroy_device(zram);
+		/*
+		 * Shouldn't access zram->disk after destroy_device
+		 * because destroy_device already released zram->disk.
+		 */
+		zram_reset_device(zram);
+	}
+
+	unregister_blkdev(zram_major, "zram");
+
+	kfree(zram_devices);
+	pr_debug("Cleanup done!\n");
 }
 
 module_init(zram_init);
