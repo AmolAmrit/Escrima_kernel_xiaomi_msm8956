@@ -572,10 +572,10 @@ static void zram_bio_discard(struct zram *zram, u32 index,
 	 * skipping this logical block is appropriate here.
 	 */
 	if (offset) {
-		if (n <= (PAGE_SIZE - offset))
+		if (n < offset)
 			return;
 
-		n -= (PAGE_SIZE - offset);
+		n -= offset;
 		index++;
 	}
 
