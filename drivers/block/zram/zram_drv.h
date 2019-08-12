@@ -95,6 +95,7 @@ struct zram {
 	struct rw_semaphore lock; /* protect compression buffers,
 				   * reads and writes
 				   */
+
 	struct request_queue *queue;
 	struct gendisk *disk;
 	int init_done;
