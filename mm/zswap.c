@@ -790,14 +790,26 @@ static void zswap_frontswap_invalidate_page(unsigned type, pgoff_t offset)
 static void zswap_frontswap_invalidate_area(unsigned type)
 {
 	struct zswap_tree *tree = zswap_trees[type];
-	struct zswap_entry *entry, *n;
+	struct rb_node *node;
+	struct zswap_entry *entry;
 
 	if (!tree)
 		return;
 
 	/* walk the tree and free everything */
 	spin_lock(&tree->lock);
-	rbtree_postorder_for_each_entry_safe(entry, n, &tree->rbroot, rbnode) {
+	/*
+	 * TODO: Even though this code should not be executed because
+	 * the try_to_unuse() in swapoff should have emptied the tree,
+	 * it is very wasteful to rebalance the tree after every
+	 * removal when we are freeing the whole tree.
+	 *
+	 * If post-order traversal code is ever added to the rbtree
+	 * implementation, it should be used here.
+	 */
+	while ((node = rb_first(&tree->rbroot))) {
+		entry = rb_entry(node, struct zswap_entry, rbnode);
+		rb_erase(&entry->rbnode, &tree->rbroot);
 		zbud_free(tree->pool, entry->handle);
 		zswap_entry_cache_free(entry);
 		atomic_dec(&zswap_stored_pages);
