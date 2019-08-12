@@ -9,7 +9,6 @@
 
 #include <linux/kernel.h>
 #include <linux/string.h>
-#include <linux/err.h>
 #include <linux/slab.h>
 #include <linux/wait.h>
 #include <linux/sched.h>
@@ -320,10 +319,9 @@ void zcomp_destroy(struct zcomp *comp)
 
 /*
  * search available compressors for requested algorithm.
- * allocate new zcomp and initialize it. return compressing
- * backend pointer or ERR_PTR if things went bad. ERR_PTR(-EINVAL)
- * if requested algorithm is not supported, ERR_PTR(-ENOMEM) in
- * case of allocation error.
+ * allocate new zcomp and initialize it. return NULL
+ * if requested algorithm is not supported or in case
+ * of init error
  */
 struct zcomp *zcomp_create(const char *compress, int max_strm)
 {
@@ -332,11 +330,11 @@ struct zcomp *zcomp_create(const char *compress, int max_strm)
 
 	backend = find_backend(compress);
 	if (!backend)
-		return ERR_PTR(-EINVAL);
+		return NULL;
 
 	comp = kzalloc(sizeof(struct zcomp), GFP_KERNEL);
 	if (!comp)
-		return ERR_PTR(-ENOMEM);
+		return NULL;
 
 	comp->backend = backend;
 	if (max_strm > 1)
@@ -345,7 +343,7 @@ struct zcomp *zcomp_create(const char *compress, int max_strm)
 		zcomp_strm_single_create(comp);
 	if (!comp->stream) {
 		kfree(comp);
-		return ERR_PTR(-ENOMEM);
+		return NULL;
 	}
 	return comp;
 }

@@ -31,7 +31,6 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
-#include <linux/err.h>
 
 #include "zram_drv.h"
 
@@ -582,7 +581,7 @@ static ssize_t disksize_store(struct device *dev,
 	struct zcomp *comp;
 	struct zram_meta *meta;
 	struct zram *zram = dev_to_zram(dev);
-	int err;
+	int err = -EINVAL;
 
 	disksize = memparse(buf, NULL);
 	if (!disksize)
@@ -594,18 +593,18 @@ static ssize_t disksize_store(struct device *dev,
 		return -ENOMEM;
 
 	comp = zcomp_create(zram->compressor, zram->max_comp_streams);
-	if (IS_ERR(comp)) {
+	if (!comp) {
 		pr_info("Cannot initialise %s compressing backend\n",
 				zram->compressor);
-		err = PTR_ERR(comp);
-		goto out_free_meta;
+		goto out_cleanup;
 	}
 
 	down_write(&zram->init_lock);
 	if (init_done(zram)) {
+		up_write(&zram->init_lock);
 		pr_info("Cannot change disksize for initialized device\n");
 		err = -EBUSY;
-		goto out_destroy_comp;
+		goto out_cleanup;
 	}
 
 	zram->meta = meta;
@@ -613,12 +612,12 @@ static ssize_t disksize_store(struct device *dev,
 	zram->disksize = disksize;
 	set_capacity(zram->disk, zram->disksize >> SECTOR_SHIFT);
 	up_write(&zram->init_lock);
+
 	return len;
 
-out_destroy_comp:
-	up_write(&zram->init_lock);
-	zcomp_destroy(comp);
-out_free_meta:
+out_cleanup:
+	if (comp)
+		zcomp_destroy(comp);
 	zram_meta_free(meta);
 	return err;
 }
