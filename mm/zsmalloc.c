@@ -285,7 +285,7 @@ static void zs_zpool_unmap(void *pool, unsigned long handle)
 
 static u64 zs_zpool_total_size(void *pool)
 {
-	return zs_get_total_pages(pool) << PAGE_SHIFT;
+	return zs_get_total_size_bytes(pool);
 }
 
 static struct zpool_driver zs_zpool_driver = {
@@ -1135,11 +1135,12 @@ void zs_unmap_object(struct zs_pool *pool, unsigned long handle)
 }
 EXPORT_SYMBOL_GPL(zs_unmap_object);
 
-unsigned long zs_get_total_pages(struct zs_pool *pool)
+u64 zs_get_total_size_bytes(struct zs_pool *pool)
 {
-	return atomic_long_read(&pool->pages_allocated);
+	u64 npages = atomic_long_read(&pool->pages_allocated);
+	return npages << PAGE_SHIFT;
 }
-EXPORT_SYMBOL_GPL(zs_get_total_pages);
+EXPORT_SYMBOL_GPL(zs_get_total_size_bytes);
 
 module_init(zs_init);
 module_exit(zs_exit);
