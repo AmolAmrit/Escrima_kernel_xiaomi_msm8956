@@ -9,6 +9,7 @@
  * Released under the terms of 3-clause BSD License
  * Released under the terms of GNU General Public License Version 2.0
  *
+ * Project home: http://compcache.googlecode.com
  */
 
 #define KMSG_COMPONENT "zram"
