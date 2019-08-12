@@ -212,7 +212,7 @@ static int zswap_entry_cache_create(void)
 	return zswap_entry_cache == NULL;
 }
 
-static void __init zswap_entry_cache_destroy(void)
+static void zswap_entry_cache_destory(void)
 {
 	kmem_cache_destroy(zswap_entry_cache);
 }
@@ -941,7 +941,7 @@ static int __init init_zswap(void)
 pcpufail:
 	zswap_comp_exit();
 compfail:
-	zswap_entry_cache_destroy();
+	zswap_entry_cache_destory();
 cachefail:
 	zpool_destroy_pool(zswap_pool);
 error:
